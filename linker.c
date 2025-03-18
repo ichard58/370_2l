@@ -55,10 +55,19 @@ struct CombinedFiles {
 	RelocationTableEntry relocTable[MAXSIZE * MAXFILES];
 };
 
+// Function to find symbol
+int findSymbol (CombinedFiles *finalOutput, const char *symbol) {
+	for (unsigned int i = 0; i < finalOutput->symbolTableSize; ++i) {
+		if (!strcmp(finalOutput->symbolTable[i].label, symbol))
+			return finalOutput->symbolTable[i].offset;
+	}
+	return -1; // Didn't find symbol
+}
+
 int main(int argc, char *argv[]) {
 	char *inFileStr, *outFileStr;
 	FILE *inFilePtr, *outFilePtr; 
-	unsigned int i, j;
+	unsigned int i, j, currentTextOffset = 0, currentDataOffset = 0;
 
     if (argc <= 2 || argc > 8 ) {
         printf("error: usage: %s <MAIN-object-file> ... <object-file> ... <output-exe-file>, with at most 5 object files\n",
@@ -75,6 +84,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	FileData files[MAXFILES];
+	CombinedFiles finalOutput = {0};
 
   // read in all files and combine into a "master" file
 	for (i = 0; i < argc - 2; ++i) {
@@ -100,6 +110,8 @@ int main(int argc, char *argv[]) {
 		files[i].dataSize = dataSize;
 		files[i].symbolTableSize = symbolTableSize;
 		files[i].relocationTableSize = relocationTableSize;
+		files[i].textStartingLine = currentTextOffset;
+		files[i].dataStartingLine = currentDataOffset;
 
 		// read in text section
 		int instr;
@@ -107,6 +119,8 @@ int main(int argc, char *argv[]) {
 			fgets(line, MAXLINELENGTH, inFilePtr);
 			instr = strtol(line, NULL, 0);
 			files[i].text[j] = instr;
+			finalOutput.text[currentTextOffset] = files[i].text[j];
+			currentTextOffset++;
 		}
 
 		// read in data section
@@ -115,9 +129,11 @@ int main(int argc, char *argv[]) {
 			fgets(line, MAXLINELENGTH, inFilePtr);
 			data = strtol(line, NULL, 0);
 			files[i].data[j] = data;
+			finalOutput.data[currentDataOffset] = files[i].data[j];
+			currentDataOffset++;
 		}
 
-		// read in the symbol table
+		// read in the symbol tables
 		char label[7];
 		char type;
 		unsigned int addr;
@@ -128,9 +144,26 @@ int main(int argc, char *argv[]) {
 			files[i].symbolTable[j].offset = addr;
 			strcpy(files[i].symbolTable[j].label, label);
 			files[i].symbolTable[j].location = type;
+			
+			// if location is T or D, can resolve
+			if (files[i].symbolTable[j].location == 'T')
+				files[i].symbolTable[j].offset += files[i].textStartingLine;
+			else if (files[i].symbolTable[j].location == 'D')
+				files[i].symbolTable[j].offset += files[i].dataStartingLine;
+			
+			// Error checking: Duplicate defined global labels
+			// might have to check for Stack label as well
+			for (unsigned int k = 0; k < finalOutput.symbolTableSize; k++) {
+				if (!strcmp(finalOutput.symbolTable[k].label, files[i].symbolTable[j].label) && finalOutput.symbolTable[k].location != 'U') {
+					printf("Error: duplicate label\n");
+					exit(1);
+				}
+			}
+			finalOutput.symbolTable[finalOutput.symbolTableSize] = files[i].symbolTable[j];
+			finalOutput.symbolTableSize++;
 		}
 
-		// read in relocation table
+		// read in relocation tables
 		char opcode[7];
 		for (j = 0; j < relocationTableSize; ++j) {
 			fgets(line, MAXLINELENGTH, inFilePtr);
@@ -147,11 +180,40 @@ int main(int argc, char *argv[]) {
 	// *** INSERT YOUR CODE BELOW ***
 	//    Begin the linking process
 	//    Happy coding!!!
-	
 
-    /* here is an example of using printHexToFile. This will print a
-       machine code word / number in the proper hex format to the output file */
-    printHexToFile(outFilePtr, 123);
+	// Second pass over relocation table to fix the addresses
+	for (i = 0; i < argc - 2; ++i) {
+		for (j = 0; j < files[i].relocationTableSize; ++j) {
+			unsigned int newAddr = findSymbol(&finalOutput, files[i].relocTable[j].label);
+
+			// Error checking: undefined symbol
+			if (newAddr == -1) {
+				printf("Error: undefined symbol\n");
+				exit(1);
+			}
+
+			// Update new address
+			unsigned int instrOffset = files[i].relocTable[j].offset + files[i].textStartingLine;
+			if (!strcmp(files[i].relocTable[j].inst, "lw") || !strcmp(files[i].relocTable[j].inst, "sw"))
+				finalOutput.text[instrOffset] = (finalOutput.text[instrOffset] & 0xFFFF0000) | (newAddr & 0xFFFF);
+		}
+	}
+
+	unsigned int stackAddr = currentTextOffset + currentDataOffset;
+	SymbolTableEntry stackSymbol;
+	strcpy(stackSymbol.label, "Stack");
+	stackSymbol.location = 'D';
+	stackSymbol.offset = stackAddr;
+	finalOutput.symbolTable[finalOutput.symbolTableSize] = stackSymbol;
+	finalOutput.symbolTableSize++;
+
+	// Write to output file
+	for (i = 0; i < currentTextOffset; ++i) {
+		printHexToFile(outFilePtr, finalOutput.text[i]);
+	}
+	for (i = 0; i < currentDataOffset; ++i) {
+		printHexToFile(outFilePtr, finalOutput.data[i]);
+	}
 
 } // main
 
