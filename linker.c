@@ -55,15 +55,6 @@ struct CombinedFiles {
 	RelocationTableEntry relocTable[MAXSIZE * MAXFILES];
 };
 
-// Function to find symbol
-int findSymbol (CombinedFiles *finalOutput, const char *symbol) {
-	for (unsigned int i = 0; i < finalOutput->symbolTableSize; ++i) {
-		if (!strcmp(finalOutput->symbolTable[i].label, symbol))
-			return finalOutput->symbolTable[i].offset;
-	}
-	return -1; // Didn't find symbol
-}
-
 int main(int argc, char *argv[]) {
 	char *inFileStr, *outFileStr;
 	FILE *inFilePtr, *outFilePtr; 
@@ -107,11 +98,13 @@ int main(int argc, char *argv[]) {
 				&textSize, &dataSize, &symbolTableSize, &relocationTableSize);
 
 		files[i].textSize = textSize;
+		finalOutput.textSize += textSize;
 		files[i].dataSize = dataSize;
+		finalOutput.dataSize += dataSize;
 		files[i].symbolTableSize = symbolTableSize;
 		files[i].relocationTableSize = relocationTableSize;
 		files[i].textStartingLine = currentTextOffset;
-		files[i].dataStartingLine = currentDataOffset;
+		
 
 		// read in text section
 		int instr;
@@ -122,6 +115,8 @@ int main(int argc, char *argv[]) {
 			finalOutput.text[currentTextOffset] = files[i].text[j];
 			currentTextOffset++;
 		}
+
+		files[i].dataStartingLine = currentTextOffset + currentDataOffset;
 
 		// read in data section
 		int data;
@@ -144,6 +139,11 @@ int main(int argc, char *argv[]) {
 			files[i].symbolTable[j].offset = addr;
 			strcpy(files[i].symbolTable[j].label, label);
 			files[i].symbolTable[j].location = type;
+
+			if (!strcmp(label, "Stack")) {
+				printf("Error: Stack label defined\n");
+				exit(1);
+			}
 			
 			// if location is T or D, can resolve
 			if (files[i].symbolTable[j].location == 'T')
@@ -173,6 +173,8 @@ int main(int argc, char *argv[]) {
 			strcpy(files[i].relocTable[j].inst, opcode);
 			strcpy(files[i].relocTable[j].label, label);
 			files[i].relocTable[j].file	= i;
+			finalOutput.relocTable[finalOutput.relocationTableSize] = files[i].relocTable[j];
+			finalOutput.relocationTableSize++;
 		}
 		fclose(inFilePtr);
 	} // end reading files
@@ -182,21 +184,54 @@ int main(int argc, char *argv[]) {
 	//    Happy coding!!!
 
 	// Second pass over relocation table to fix the addresses
-	for (i = 0; i < argc - 2; ++i) {
-		for (j = 0; j < files[i].relocationTableSize; ++j) {
-			unsigned int newAddr = findSymbol(&finalOutput, files[i].relocTable[j].label);
+	for (i = 0; i < finalOutput.relocationTableSize; ++i) {
+		unsigned int instrOffset = finalOutput.relocTable[i].offset;
+		unsigned int file = finalOutput.relocTable[i].file;
+		int newAddr = 0;
+		int found = 0;
 
-			// Error checking: undefined symbol
-			if (newAddr == -1) {
-				printf("Error: undefined symbol\n");
-				exit(1);
+		// check if label is in symbol table (global label)
+		for (unsigned int k = 0; k < finalOutput.symbolTableSize; ++k) {
+			if (!strcmp(finalOutput.symbolTable[k].label, finalOutput.relocTable[i].label) && finalOutput.symbolTable[k].location != 'U') {
+				char loc = finalOutput.symbolTable[k].location;
+				if (loc == 'T')
+					newAddr = files[file].textStartingLine + finalOutput.symbolTable[k].offset;
+				else
+					newAddr = finalOutput.symbolTable[k].offset;
+				found = 1;
+				break;
 			}
-
-			// Update new address
-			unsigned int instrOffset = files[i].relocTable[j].offset + files[i].textStartingLine;
-			if (!strcmp(files[i].relocTable[j].inst, "lw") || !strcmp(files[i].relocTable[j].inst, "sw"))
-				finalOutput.text[instrOffset] = (finalOutput.text[instrOffset] & 0xFFFF0000) | (newAddr & 0xFFFF);
 		}
+
+		// if not found in symbol table, check if local label
+		if (!found) {
+			int originalOffset;
+			// if label is used in data section
+			if (!strcmp(finalOutput.relocTable[i].inst, ".fill")) {
+				originalOffset = files[file].data[instrOffset] & 0xFFFF;
+
+				// if line number + original offset < textSize, it's in the text section
+				if (originalOffset < files[file].textSize) {
+					newAddr = files[file].textStartingLine + originalOffset;
+				}
+				else {
+					newAddr = (originalOffset - files[file].textSize) + files[file].dataStartingLine;
+				}
+			}
+			// if label is used in text section
+			else {
+				originalOffset = files[file].text[instrOffset] & 0xFFFF;
+
+				if (instrOffset + originalOffset >= files[file].textSize) {
+					newAddr = originalOffset + (finalOutput.textSize - files[file].textSize);
+				}
+			}
+		}
+
+		if (!strcmp(finalOutput.relocTable[i].inst, "lw") || !strcmp(finalOutput.relocTable[i].inst, "sw"))
+			finalOutput.text[instrOffset + files[file].textStartingLine] = (finalOutput.text[instrOffset + files[file].textStartingLine] & 0xFFFF0000) | (newAddr & 0xFFFF);
+		else
+			finalOutput.data[instrOffset + (finalOutput.dataSize - files[file].dataSize)] = newAddr;
 	}
 
 	unsigned int stackAddr = currentTextOffset + currentDataOffset;
